@@ -1,0 +1,58 @@
+CREATE OR REPLACE TABLE `just-data-sandbox-oos.feature_engineering.FE1054` AS
+WITH time_ranges AS (
+  SELECT
+    unique_id,
+    restaurant_id,
+    createdTime AS event_time,
+    scenario,
+    LEAD(createdTime) OVER (PARTITION BY restaurant_id ORDER BY createdTime) AS next_event_time
+  FROM `just-data-sandbox-oos.feature_engineering.cleaned_data`
+),
+overlapping_oos AS (
+  SELECT
+    c.unique_id,
+    c.restaurant_id,
+    c.event_time AS createdTime,
+    c.scenario AS current_scenario,  
+    p.event_time AS prev_time,  
+    p.scenario AS prev_scenario,  
+    p.next_event_time AS prev_next_event_time,  
+    GREATEST(
+      TIMESTAMP_TRUNC(c.event_time, DAY),  -- Get the start of the current day
+      p.event_time
+    ) AS overlap_start,  
+    LEAST(
+      c.event_time,
+      COALESCE(p.next_event_time, c.event_time)
+    ) AS overlap_end,  
+    CASE 
+      WHEN p.scenario = 'OUT_OF_STOCK' AND TIMESTAMP_DIFF(
+        LEAST(c.event_time, COALESCE(p.next_event_time, c.event_time)),
+        GREATEST(TIMESTAMP_TRUNC(c.event_time, DAY), p.event_time),
+        MINUTE  
+      ) > 0 THEN 
+        TIMESTAMP_DIFF(
+          LEAST(c.event_time, COALESCE(p.next_event_time, c.event_time)),
+          GREATEST(TIMESTAMP_TRUNC(c.event_time, DAY), p.event_time),
+          MINUTE  
+        )
+      ELSE 0 
+    END AS overlapping_minutes  
+  FROM time_ranges AS c
+  JOIN time_ranges AS p
+    ON c.restaurant_id = p.restaurant_id
+   AND p.event_time < c.event_time
+   AND p.event_time >= TIMESTAMP_TRUNC(c.event_time, DAY)  -- Only consider times after the start of the day
+)
+SELECT
+  t.unique_id,
+  t.restaurant_id,  
+  t.event_time AS createdTime,  
+  t.scenario AS current_scenario,  
+  COALESCE(SUM(o.overlapping_minutes), 0) AS oos_duration_since_start_of_day_minutes  
+FROM time_ranges AS t
+LEFT JOIN overlapping_oos AS o
+  ON t.restaurant_id = o.restaurant_id
+ AND t.event_time = o.createdTime
+GROUP BY t.unique_id, t.restaurant_id, t.event_time, t.scenario
+ORDER BY t.unique_id, t.restaurant_id, t.event_time DESC;
